@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Config = HashMap<String, InterfaceConfig>;
 
@@ -10,11 +10,13 @@ pub struct InterfaceConfig {
     pub address_config: AddressConfig,
     pub set_link_route: bool,
     pub set_gateway_route: bool,
+    pub rs_duration: u64,
+    pub accept_teredo: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum AddressConfig {
     Slaac,
     DHCPv6,
-    Static(String)
+    Static(String),
 }
