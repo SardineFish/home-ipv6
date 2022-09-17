@@ -1,5 +1,5 @@
 [package]
-name = "home-server-ipv6"
+name = "home-ipv6"
 version = "0.1.0"
 edition = "2021"
 
