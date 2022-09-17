@@ -11,7 +11,6 @@ pub struct InterfaceConfig {
     pub set_link_route: bool,
     pub set_gateway_route: bool,
     pub rs_duration: u64,
-    pub accept_teredo: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

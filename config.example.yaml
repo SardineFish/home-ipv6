@@ -1,0 +1,6 @@
+enp1s0:
+  accept_ra: true
+  address_config: Slaac
+  set_link_route: false
+  set_gateway_route: true
+  rs_duration: 30
