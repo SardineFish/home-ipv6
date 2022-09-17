@@ -3,4 +3,6 @@ enp1s0:
   address_config: Slaac
   set_link_route: false
   set_gateway_route: true
-  rs_duration: 30
+  max_rtr_solicitations: 3
+  rtr_solicitation_interval: 2
+  max_rtr_solicitation_delay: 60

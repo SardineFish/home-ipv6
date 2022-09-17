@@ -4,9 +4,10 @@ use config::Config;
 
 mod config;
 mod handler;
+mod icmp_v6;
 
 fn main() {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("debug"));
     let config = if let Some(config_path) = args().nth(1) {
         let data = fs::read(&config_path).unwrap();
         serde_yaml::from_slice::<Config>(&data).unwrap()

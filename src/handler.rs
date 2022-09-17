@@ -1,36 +1,35 @@
 use std::{
     borrow::Cow,
-    io,
     net::Ipv6Addr,
     process::{self, Command},
-    time::{Duration, Instant},
+    thread::spawn,
+    time::Duration,
 };
 
-use crate::config::{AddressConfig, InterfaceConfig};
+use crate::{
+    config::{AddressConfig, InterfaceConfig},
+    icmp_v6::ICMPv6Socket,
+};
 use pnet::{
-    datalink::{self, Channel, ChannelType, DataLinkSender, EtherType, NetworkInterface},
+    datalink::{self, NetworkInterface},
     packet::{
         icmpv6::{
             self,
             ndp::{MutableRouterSolicitPacket, NdpOptionTypes, RouterAdvertPacket},
             Icmpv6Packet, Icmpv6Types,
         },
-        ip::IpNextHeaderProtocols,
-        ipv6::{Ipv6Packet, MutableIpv6Packet},
         Packet, PacketSize,
     },
 };
 use pnet_macros::packet;
 use pnet_macros_support::types::u32be;
 
-const ETH_P_IPV6: EtherType = 0x86DD;
-// const IPPROTO_ICMP: EtherType = 1;
-
 #[derive(Debug, Clone)]
 pub struct InterfaceConfigTask {
     iface_name: String,
     config: InterfaceConfig,
     interface: NetworkInterface,
+    socket: ICMPv6Socket,
 }
 
 impl InterfaceConfigTask {
@@ -40,62 +39,49 @@ impl InterfaceConfigTask {
             .find(|iface| iface.name == iface_name)
             .unwrap();
         Self {
+            socket: ICMPv6Socket::new(&iface_name).unwrap(),
             iface_name,
             config,
             interface,
         }
     }
     pub fn handle(self) {
-        if let Channel::Ethernet(mut tx, mut rx) = datalink::channel(
-            &self.interface,
-            pnet::datalink::Config {
-                channel_type: ChannelType::Layer3(ETH_P_IPV6),
-                promiscuous: true,
-                read_timeout: Some(Duration::from_secs(1)),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        {
-            let mut next_rs = Instant::now();
-            log::info!("Listening packet on {}", self.iface_name);
-            loop {
-                match rx.next() {
-                    Ok(packet) => {
-                        if let Err(err) = self.handle_ipv6_packet(packet) {
-                            log::error!("{err}");
-                        }
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::TimedOut => (),
-                    err => {
-                        err.unwrap();
-                    }
-                }
+        let task = self.clone();
+        spawn(move || task.send_rs());
 
-                if Instant::now() >= next_rs {
-                    next_rs = Instant::now() + Duration::from_secs(self.config.rs_duration);
-                    if let Err(err) = self.send_rs(&mut tx) {
-                        log::error!("{err}");
-                    }
-                }
+        let mut buf = [0u8; 1500];
+        loop {
+            let (size, addr) = self.socket.recv_from(&mut buf).unwrap();
+            let packet = &buf[..size];
+            if let Err(err) = self.handle_icmpv6_packet(addr, packet) {
+                log::error!("{err}");
             }
         }
     }
 
-    fn handle_ipv6_packet(&self, packet: &[u8]) -> Result<(), Cow<str>> {
-        let ipv6_packet = Ipv6Packet::new(packet).ok_or("Received non IPv6 packet")?;
+    pub fn send_rs(self) {
+        let mut buf = [0u8; 1500];
+        let size = self.build_rs_packet(&mut buf).unwrap();
+        let packet = &buf[..size];
 
-        // log::debug!(
-        //     "get ipv6 packet from {} type {}",
-        //     ipv6_packet.get_source(),
-        //     ipv6_packet.get_next_header()
-        // );
+        loop {
+            for _ in 0..self.config.max_rtr_solicitations {
+                let result = self
+                    .socket
+                    .send(packet, Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2));
+                if let Err(err) = result {
+                    log::error!("{err}");
+                }
 
-        if ipv6_packet.get_next_header() != IpNextHeaderProtocols::Icmpv6 {
-            return Ok(());
+                std::thread::sleep(Duration::from_secs(self.config.rtr_solicitation_interval));
+            }
+
+            std::thread::sleep(Duration::from_secs(self.config.max_rtr_solicitation_delay));
         }
-        let icmpv6_packet =
-            Icmpv6Packet::new(ipv6_packet.payload()).ok_or("Invalid ICMPv6 packet")?;
+    }
+
+    fn handle_icmpv6_packet(&self, remote_addr: Ipv6Addr, packet: &[u8]) -> Result<(), Cow<str>> {
+        let icmpv6_packet = Icmpv6Packet::new(packet).ok_or("Invalid ICMPv6 packet")?;
 
         if icmpv6_packet.get_icmpv6_type() != Icmpv6Types::RouterAdvert {
             return Ok(());
@@ -106,8 +92,7 @@ impl InterfaceConfigTask {
         //     icmpv6_packet.get_icmpv6_type()
         // );
 
-        let ra_packet =
-            RouterAdvertPacket::new(ipv6_packet.payload()).ok_or("Invalid RA packet")?;
+        let ra_packet = RouterAdvertPacket::new(packet).ok_or("Invalid RA packet")?;
 
         // log::debug!(
         //     "Get RA packet with {} options",
@@ -124,7 +109,7 @@ impl InterfaceConfigTask {
             }
         }
 
-        if let Err(err) = self.config_default_route(&ipv6_packet, ra_packet) {
+        if let Err(err) = self.config_default_route(remote_addr, ra_packet) {
             log::error!("Failed to config default route: {err}");
         }
 
@@ -133,7 +118,7 @@ impl InterfaceConfigTask {
 
     fn config_default_route(
         &self,
-        ipv6_packet: &Ipv6Packet,
+        remote_addr: Ipv6Addr,
         ra_packet: RouterAdvertPacket,
     ) -> Result<(), Cow<str>> {
         if self.config.set_gateway_route {
@@ -144,7 +129,7 @@ impl InterfaceConfigTask {
                     "replace",
                     "default",
                     "via",
-                    &ipv6_packet.get_source().to_string(),
+                    &remote_addr.to_string(),
                     "dev",
                     &self.iface_name,
                     "expires",
@@ -154,7 +139,7 @@ impl InterfaceConfigTask {
                 .map_err(|e| e.to_string())?;
             log::info!(
                 "Added default route via {} dev {}",
-                ipv6_packet.get_source(),
+                remote_addr,
                 self.iface_name
             );
         }
@@ -215,11 +200,11 @@ impl InterfaceConfigTask {
         Ok(())
     }
 
-    fn send_rs(&self, sender: &mut Box<dyn DataLinkSender>) -> Result<(), Cow<str>> {
+    fn build_rs_packet(&self, buf: &mut [u8]) -> Result<usize, Cow<str>> {
         // log::debug!("Construct Router Solicit");
-        let mut buf = [0u8; MutableRouterSolicitPacket::minimum_packet_size()];
+        let buf = &mut buf[..MutableRouterSolicitPacket::minimum_packet_size()];
         let mut rs_packet =
-            MutableRouterSolicitPacket::new(&mut buf).ok_or("Failed to create RS packet")?;
+            MutableRouterSolicitPacket::new(buf).ok_or("Failed to create RS packet")?;
         rs_packet.set_icmpv6_type(Icmpv6Types::RouterSolicit);
         rs_packet.set_icmpv6_code(icmpv6::Icmpv6Code(0));
         rs_packet.set_checksum(0xffff);
@@ -231,24 +216,24 @@ impl InterfaceConfigTask {
         drop(icmp_packet);
         rs_packet.set_checksum(checksum);
 
-        let mut ip_buf = [0u8; MutableIpv6Packet::minimum_packet_size() + 8];
-        let mut ipv6_packet =
-            MutableIpv6Packet::new(&mut ip_buf).ok_or("Failed to create IPv6 packet")?;
-        ipv6_packet.set_version(6);
-        ipv6_packet.set_payload_length(rs_packet.packet_size() as u16);
-        ipv6_packet.set_next_header(IpNextHeaderProtocols::Icmpv6);
-        ipv6_packet.set_hop_limit(255);
-        ipv6_packet.set_source(src_addr);
-        ipv6_packet.set_destination(dst_addr);
-        ipv6_packet.set_payload(rs_packet.packet());
-        let size = ipv6_packet.packet_size();
-        drop(ipv6_packet);
-        sender
-            .send_to(&ip_buf[..size], Some(self.interface.clone()))
-            .unwrap()
-            .map_err(|e| e.to_string())?;
+        // let mut ip_buf = [0u8; MutableIpv6Packet::minimum_packet_size() + 8];
+        // let mut ipv6_packet =
+        //     MutableIpv6Packet::new(&mut ip_buf).ok_or("Failed to create IPv6 packet")?;
+        // ipv6_packet.set_version(6);
+        // ipv6_packet.set_payload_length(rs_packet.packet_size() as u16);
+        // ipv6_packet.set_next_header(IpNextHeaderProtocols::Icmpv6);
+        // ipv6_packet.set_hop_limit(255);
+        // ipv6_packet.set_source(src_addr);
+        // ipv6_packet.set_destination(dst_addr);
+        // ipv6_packet.set_payload(rs_packet.packet());
+        // let size = ipv6_packet.packet_size();
+        // drop(ipv6_packet);
+        // sender
+        //     .send_to(&ip_buf[..size], Some(self.interface.clone()))
+        //     .unwrap()
+        //     .map_err(|e| e.to_string())?;
 
-        Ok(())
+        Ok(rs_packet.packet_size())
     }
 }
 
