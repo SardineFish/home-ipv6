@@ -1,6 +1,6 @@
 # SLAAC Client for my Home Server
 
-Reference: 
+Reference: [HomeServer - 家庭 IPv6 组网](https://www.sardinefish.com/blog/617)
 
 ## Usage
 
