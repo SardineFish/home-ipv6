@@ -136,6 +136,8 @@ impl InterfaceConfigTask {
                     &ra_packet.get_lifetime().to_string(),
                 ])
                 .spawn()
+                .map_err(|e| e.to_string())?
+                .wait()
                 .map_err(|e| e.to_string())?;
             log::info!(
                 "Added default route via {} dev {}",
@@ -189,6 +191,8 @@ impl InterfaceConfigTask {
                     "noprefixroute",
                 ])
                 .spawn()
+                .map_err(|e| e.to_string())?
+                .wait()
                 .map_err(|e| e.to_string())?;
 
             log::info!(
