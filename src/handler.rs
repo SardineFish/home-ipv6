@@ -177,6 +177,15 @@ impl InterfaceConfigTask {
 
             let ipv6_addr = Ipv6Addr::from(ipv6_addr);
 
+            let valid_lft = self
+                .config
+                .valid_lft
+                .unwrap_or(prefix_info.get_valid_lifetime() as u64);
+            let prefered_lft = self
+                .config
+                .prefer_lft
+                .unwrap_or(prefix_info.get_prefered_lifetime() as u64);
+
             process::Command::new("ip")
                 .args([
                     "addr",
@@ -185,9 +194,9 @@ impl InterfaceConfigTask {
                     "dev",
                     &self.iface_name,
                     "valid_lft",
-                    &prefix_info.get_valid_lifetime().to_string(),
+                    &valid_lft.to_string(),
                     "preferred_lft",
-                    &prefix_info.get_prefered_lifetime().to_string(),
+                    &prefered_lft.to_string(),
                     "noprefixroute",
                 ])
                 .spawn()
@@ -198,7 +207,7 @@ impl InterfaceConfigTask {
             log::info!(
                 "Added IPv6 address {ipv6_addr} from prefix {} with valid_lft {}",
                 prefix_info.get_prefix(),
-                prefix_info.get_valid_lifetime(),
+                valid_lft,
             );
         };
         Ok(())

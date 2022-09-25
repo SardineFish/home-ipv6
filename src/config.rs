@@ -27,6 +27,10 @@ pub struct InterfaceConfig {
     ///
     /// See [RFC 6864 Section-6.3.7](https://www.rfc-editor.org/rfc/rfc4861#section-6.3.7)
     pub max_rtr_solicitation_delay: u64,
+
+    pub valid_lft: Option<u64>,
+
+    pub prefer_lft: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
