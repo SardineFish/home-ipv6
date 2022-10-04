@@ -69,6 +69,7 @@ impl InterfaceConfigTask {
                 let result = self
                     .socket
                     .send(packet, Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2));
+                // log::info!("RS sent");
                 if let Err(err) = result {
                     log::error!("{err}");
                 }
@@ -189,7 +190,7 @@ impl InterfaceConfigTask {
             process::Command::new("ip")
                 .args([
                     "addr",
-                    "add",
+                    "replace",
                     &format!("{}/{}", ipv6_addr, prefix_info.get_prefix_length()),
                     "dev",
                     &self.iface_name,
