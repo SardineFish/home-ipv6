@@ -1,7 +1,7 @@
 use std::{
     ffi::CString,
     io,
-    mem::{self},
+    mem::{self, size_of},
     net::Ipv6Addr,
 };
 
@@ -26,6 +26,20 @@ impl ICMPv6Socket {
                 libc::SO_BINDTODEVICE,
                 nic.as_ptr() as *const libc::c_void,
                 (interface.len() + 1) as libc::socklen_t,
+            )
+        };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let result = unsafe {
+            let limit: i32 = 255;
+            libc::setsockopt(
+                socket,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MULTICAST_HOPS,
+                &limit as *const _ as *const libc::c_void,
+                size_of::<i32>() as u32,
             )
         };
         if result < 0 {

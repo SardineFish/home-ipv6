@@ -9,31 +9,33 @@ use std::{
 use crate::{
     config::{AddressConfig, InterfaceConfig},
     icmp_v6::ICMPv6Socket,
+    ra_sender::PrefixManager,
 };
 use pnet::{
     datalink::{self, NetworkInterface},
     packet::{
         icmpv6::{
             self,
-            ndp::{MutableRouterSolicitPacket, NdpOptionTypes, RouterAdvertPacket},
+            ndp::{MutableRouterSolicitPacket, NdpOptionType, NdpOptionTypes, RouterAdvertPacket},
             Icmpv6Packet, Icmpv6Types,
         },
-        Packet, PacketSize,
+        FromPacket, Packet, PacketSize,
     },
 };
 use pnet_macros::packet;
 use pnet_macros_support::types::u32be;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InterfaceConfigTask {
     iface_name: String,
     config: InterfaceConfig,
     interface: NetworkInterface,
     socket: ICMPv6Socket,
+    prefix_manager: PrefixManager,
 }
 
 impl InterfaceConfigTask {
-    pub fn new(iface_name: String, config: InterfaceConfig) -> Self {
+    pub fn new(iface_name: String, config: InterfaceConfig, prefix_manager: PrefixManager) -> Self {
         let interface = datalink::interfaces()
             .into_iter()
             .find(|iface| iface.name == iface_name)
@@ -43,9 +45,13 @@ impl InterfaceConfigTask {
             iface_name,
             config,
             interface,
+            prefix_manager,
         }
     }
     pub fn handle(self) {
+        if !self.config.accept_ra {
+            return;
+        }
         let task = self.clone();
         spawn(move || task.send_rs());
 
@@ -154,6 +160,8 @@ impl InterfaceConfigTask {
         let prefix_info =
             RAPrefixInfomationPacket::new(payload).ok_or("Invalid RA Prefix Info packet")?;
 
+        self.prefix_manager.add_prefix(prefix_info.from_packet());
+
         if let Err(err) = self.config_addr(prefix_info) {
             log::error!("Failed to config address: {err}");
         }
@@ -222,12 +230,11 @@ impl InterfaceConfigTask {
         rs_packet.set_icmpv6_type(Icmpv6Types::RouterSolicit);
         rs_packet.set_icmpv6_code(icmpv6::Icmpv6Code(0));
         rs_packet.set_checksum(0xffff);
-        let icmp_packet =
-            Icmpv6Packet::new(rs_packet.packet()).ok_or("Failed to construct ICMPv6 packet")?;
-        let src_addr = Ipv6Addr::UNSPECIFIED;
-        let dst_addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2);
-        let checksum = icmpv6::checksum(&icmp_packet, &src_addr, &dst_addr);
-        drop(icmp_packet);
+        let checksum = calc_icmp_checksum(
+            &rs_packet,
+            Ipv6Addr::UNSPECIFIED,
+            Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 2),
+        )?;
         rs_packet.set_checksum(checksum);
 
         // let mut ip_buf = [0u8; MutableIpv6Packet::minimum_packet_size() + 8];
@@ -249,6 +256,19 @@ impl InterfaceConfigTask {
 
         Ok(rs_packet.packet_size())
     }
+}
+
+/// Fill checksum with 0xffff before calculate
+pub fn calc_icmp_checksum(
+    rs_packet: &impl Packet,
+    src_addr: Ipv6Addr,
+    dst_addr: Ipv6Addr,
+) -> Result<u16, &'static str> {
+    let icmp_packet =
+        Icmpv6Packet::new(rs_packet.packet()).ok_or("Failed to construct Icmpv6Packet")?;
+    let src_addr = src_addr;
+    let dst_addr = dst_addr;
+    Ok(icmpv6::checksum(&icmp_packet, &src_addr, &dst_addr))
 }
 
 /// ``` text
@@ -289,4 +309,24 @@ pub struct RAPrefixInfomation {
     #[payload]
     #[length = "0"]
     _payload: Vec<u8>,
+}
+
+/// See https://www.rfc-editor.org/rfc/rfc4861#section-4.6.1
+/// ```text
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  |     Type      |    Length     |    Link-Layer Address ...
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[packet]
+pub struct LinkLayerAddress {
+    #[construct_with(u8)]
+    pub typ: NdpOptionType,
+    pub length: u8,
+    #[payload]
+    #[length_fn = "link_layer_addr_length"]
+    pub link_layer_addr: Vec<u8>,
+}
+
+fn link_layer_addr_length(packet: &LinkLayerAddressPacket) -> usize {
+    packet.get_length() as usize * 8 - 2
 }
