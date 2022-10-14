@@ -160,7 +160,10 @@ impl InterfaceConfigTask {
         let prefix_info =
             RAPrefixInfomationPacket::new(payload).ok_or("Invalid RA Prefix Info packet")?;
 
-        self.prefix_manager.add_prefix(prefix_info.from_packet());
+        let mut info = prefix_info.from_packet();
+        info.valid_lifetime = self.config.valid_lft.unwrap_or(600) as u32be;
+        info.prefered_lifetime = self.config.prefer_lft.unwrap_or(1800) as u32be;
+        self.prefix_manager.add_prefix(info);
 
         if let Err(err) = self.config_addr(prefix_info) {
             log::error!("Failed to config address: {err}");
