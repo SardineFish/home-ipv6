@@ -25,6 +25,9 @@ fn main() {
     });
 
     for (name, config) in config.into_iter() {
+        if !config.send_ra {
+            continue;
+        }
         let prefix_manager = prefix_manager.clone();
         spawn(move || {
             RASender::new(&name, config, prefix_manager)
